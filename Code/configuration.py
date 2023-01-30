@@ -40,6 +40,7 @@ def read_config() -> None:
 
     config = ConfigParser()
     if config.read(['.CVEfixes.ini',
+                    Path(__file__).parent.parent / '.CVEfixes.ini',
                     Path.home() / '.config' / 'CVEfixes.ini',
                     Path.home() / '.CVEfixes.ini']):
         # try and update settings for each of the values, use

@@ -22,7 +22,7 @@ import database as db
 
 urlhead = 'https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-'
 urltail = '.json.zip'
-initYear = 2002
+initYear = 2022
 currentYear = datetime.datetime.now().year
 
 # Consider only current year CVE records when sample_limit>0 for the simplified example.
@@ -31,18 +31,18 @@ if cf.SAMPLE_LIMIT > 0:
 
 df = pd.DataFrame()
 
-ordered_cve_columns = ['cve_id', 'published_date', 'last_modified_date', 'description', 'nodes', 'severity',
-                       'obtain_all_privilege', 'obtain_user_privilege', 'obtain_other_privilege',
-                       'user_interaction_required',
-                       'cvss2_vector_string', 'cvss2_access_vector', 'cvss2_access_complexity', 'cvss2_authentication',
-                       'cvss2_confidentiality_impact', 'cvss2_integrity_impact', 'cvss2_availability_impact',
-                       'cvss2_base_score',
+ordered_cve_columns = ['cve_id', 'published_date', 'last_modified_date', 'description', 'nodes',
+                       # 'severity', 'obtain_all_privilege', 'obtain_user_privilege', 'obtain_other_privilege',
+                       # 'user_interaction_required',
+                       # 'cvss2_vector_string', 'cvss2_access_vector', 'cvss2_access_complexity', 'cvss2_authentication',
+                       # 'cvss2_confidentiality_impact', 'cvss2_integrity_impact', 'cvss2_availability_impact',
+                       # 'cvss2_base_score',
                        'cvss3_vector_string', 'cvss3_attack_vector', 'cvss3_attack_complexity',
                        'cvss3_privileges_required',
                        'cvss3_user_interaction', 'cvss3_scope', 'cvss3_confidentiality_impact',
                        'cvss3_integrity_impact',
                        'cvss3_availability_impact', 'cvss3_base_score', 'cvss3_base_severity',
-                       'exploitability_score', 'impact_score', 'ac_insuf_info',
+                       'exploitability_score', 'impact_score', # 'ac_insuf_info',
                        'reference_json', 'problemtype_json']
 
 cwe_columns = ['cwe_id', 'cwe_name', 'description', 'extended_description', 'url', 'is_category']

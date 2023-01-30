@@ -4,11 +4,13 @@ import re
 import uuid
 
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
 import configuration as cf
 from guesslang import Guess
 from pydriller import Repository
 from utils import log_commit_urls
-
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -73,27 +75,116 @@ method_columns = [
 ]
 
 
+def check_url_commit(url):
+    commit_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
+                 r'(?P<project>[^\/]*))\/(commit|commits)\/(?P<hash>\w+)#?)+)'
+    link = re.search(commit_url, url)
+    if link:
+        return link.group('hash'), link.group('repo').replace(r'http:', r'https:')
+    return None, None
+
+
+def check_url_pullrequest(url):
+    pullrequest_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
+                      r'(?P<project>[^\/]*))\/pull\/(?P<ID>\w+)#?)+)'
+    link = re.search(pullrequest_url, url)
+    if link:
+        commit_list_url = link.group('repo') + "/pull/" + link.group('ID') + "/commits_list"
+        # header = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0"}
+        # print("PR ", url, commit_list_url)
+        request = requests.get(commit_list_url)
+        web_data = request.content
+        soup = BeautifulSoup(web_data, features="html.parser")
+        # print(url, commit_list_url)
+        # print(soup)
+
+        # print(link.group('repo'))
+        # print(soup.find_all("clipboard-copy"))
+        hashes = [item["value"] for item in soup.find_all("clipboard-copy")]  # soup.select("input[name='oid']")]
+        # print(hashes)
+        # a = input("verify PR "+url)
+        if hashes:
+            return hashes, link.group('repo').replace(r'http:', r'https:')
+    return [], None
+
+
+def check_url_issue(url):
+    issue_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
+                r'(?P<project>[^\/]*))\/issues\/(?P<ID>\w+)#?)+)'
+
+    link = re.search(issue_url, url)
+    if link:
+        issues_url = link.group('repo') + "/issues/" + link.group('ID')
+        # header = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0"}
+        print("issue ", url, issues_url)
+        request = requests.get(issues_url)
+        web_data = request.content
+        soup = BeautifulSoup(web_data, features="html.parser")
+        search_string = f"/{link.group('owner')}/{link.group('project')}/commit/"
+        # print(search_string)
+        links = []
+        for item in soup.select(f"a[href*='{search_string}']"):
+            # print(item.get("class","noclass"), item)
+            if "commit-tease-sha" not in item.get("class", []):
+                href = item["href"]
+                if not href.startswith(search_string):
+                    href = href[href.find(search_string):]
+                links.append(href)
+        hashes = set([link.split("/")[4] for link in links])  # soup.select("input[name='oid']")]
+        # print(hashes)
+        search_string = f"/{link.group('owner')}/{link.group('project')}/pull/"
+        # print(search_string)
+        pullrequests = [item["href"] for item in soup.select(f"a[href*='{search_string}']")]
+        for pullrequest in pullrequests:
+            if pullrequest.startswith(search_string):
+                pullrequest = "https://github.com" + pullrequest
+            new_hashes, _ = check_url_pullrequest(pullrequest)
+            # print(pullrequest, new_hashes)
+            hashes |= set(new_hashes)
+            # print(hashes)
+        # a = input("verify "+url)
+        if hashes:
+            return list(hashes), link.group('repo').replace(r'http:', r'https:')
+    return [], None
+
+
+def check_url(url):
+    for func in [check_url_commit, check_url_pullrequest, check_url_issue]:
+        hashes, repo = func(url)
+        if hashes:
+            return hashes, repo
+    return [], None
+
+
 def extract_project_links(df_master):
     """
     extracts all the reference urls from CVE records that match to the repo commit urls
     """
     df_fixes = pd.DataFrame(columns=fixes_columns)
-    git_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/(?P<project>[^\/]*))\/(commit|commits)\/(?P<hash>\w+)#?)+)'
     cf.logger.info('-' * 70)
     cf.logger.info('Extracting all reference URLs from CVEs...')
     for i in range(len(df_master)):
         ref_list = ast.literal_eval(df_master['reference_json'].iloc[i])
+        found = False
+        other_url = []
         if len(ref_list) > 0:
             for ref in ref_list:
-                url = dict(ref)['url']
-                link = re.search(git_url, url)
-                if link:
+                hashes, repo_url = check_url(dict(ref)['url'])
+
+                for commit_hash in hashes:
                     row = {
                         'cve_id': df_master['cve_id'][i],
-                        'hash': link.group('hash'),
-                        'repo_url': link.group('repo').replace(r'http:', r'https:')
+                        'hash': commit_hash,
+                        'repo_url': repo_url
                     }
-                    df_fixes = df_fixes.append(pd.Series(row), ignore_index=True)
+                    df_fixes = pd.concat([df_fixes, pd.Series(row)])
+                    # cf.logger.debug(f'{df_master["cve_id"][i]}: ACCEPTED url "{url}"')
+                    found = True
+                if not hashes:
+                    other_url.append(dict(ref)['url'])
+            if not found and other_url:
+                urls = "\n".join(other_url)
+                cf.logger.debug(f'{df_master["cve_id"][i]}: ignored urls:\n{urls}')
 
     df_fixes = df_fixes.drop_duplicates().reset_index(drop=True)
     cf.logger.info(f'Found {len(df_fixes)} references to vulnerability fixing commits')
@@ -261,16 +352,16 @@ def get_files(commit):
                 file_change_id = uuid.uuid4().fields[-1]
 
                 file_row = {
-                    'file_change_id': file_change_id,       # filename: primary key
-                    'hash': commit.hash,                    # hash: foreign key
+                    'file_change_id': file_change_id,  # filename: primary key
+                    'hash': commit.hash,  # hash: foreign key
                     'filename': file.filename,
                     'old_path': file.old_path,
                     'new_path': file.new_path,
-                    'change_type': file.change_type,        # i.e. added, deleted, modified or renamed
-                    'diff': file.diff,                      # diff of the file as git presents it (e.g. @@xx.. @@)
-                    'diff_parsed': file.diff_parsed,        # diff parsed in a dict containing added and deleted lines lines
-                    'num_lines_added': file.added_lines,        # number of lines added
-                    'num_lines_deleted': file.deleted_lines,    # number of lines removed
+                    'change_type': file.change_type,  # i.e. added, deleted, modified or renamed
+                    'diff': file.diff,  # diff of the file as git presents it (e.g. @@xx.. @@)
+                    'diff_parsed': file.diff_parsed,  # diff parsed in a dict containing added and deleted lines lines
+                    'num_lines_added': file.added_lines,  # number of lines added
+                    'num_lines_deleted': file.deleted_lines,  # number of lines removed
                     'code_after': file.source_code,
                     'code_before': file.source_code_before,
                     'nloc': file.nloc,
@@ -312,7 +403,8 @@ def extract_commits(repo_url, hashes):
     if 'github' in repo_url:
         repo_url = repo_url + '.git'
 
-    cf.logger.debug(f'Extracting commits for {repo_url} with {cf.NUM_WORKERS} worker(s) looking for the following hashes:')
+    cf.logger.debug(
+        f'Extracting commits for {repo_url} with {cf.NUM_WORKERS} worker(s) looking for the following hashes:')
     log_commit_urls(repo_url, hashes)
 
     # giving first priority to 'single' parameter for single hash because
