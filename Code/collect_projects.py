@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import requests
 import time
@@ -7,7 +9,7 @@ from github.GithubException import BadCredentialsException
 
 import configuration as cf
 import database as db
-from collect_commits import extract_commits, extract_project_links
+from collect_commits import extract_commits, extract_project_links, test_random_subset_cve_links
 import cve_importer
 from utils import prune_tables
 
@@ -66,11 +68,20 @@ def convert_runtime(start_time, end_time) -> (int, int, int):
     return floor(hours), floor(minutes), round(seconds)
 
 
-def get_ref_links():
+def get_ref_links(verify=False):
     """
     retrieves reference links from CVE records to populate 'fixes' table
     """
-    if db.table_exists('fixes'):
+    if verify:
+        results = {}
+        for year in range(2002, 2024):
+            df_master = pd.read_sql(f"SELECT * FROM cve WHERE cve_id LIKE 'CVE-{year}%'", con=db.conn)
+            found, found_new, processed = test_random_subset_cve_links(df_master)
+            results[year] = {"total": len(df_master), "found_orig":found,"found_new":found_new,"additional":processed}
+        json.dumps(results)
+        json.dump(results, open("Data/json/compare_stats.json", "w"))
+        return None
+    elif db.table_exists('fixes'):
         if cf.SAMPLE_LIMIT > 0:
             df_fixes = pd.read_sql("SELECT * FROM fixes LIMIT " + str(cf.SAMPLE_LIMIT), con=db.conn)
             df_fixes.to_sql(name='fixes', con=db.conn, if_exists='replace', index=False)
@@ -244,6 +255,8 @@ if __name__ == '__main__':
     # Step (1) save CVEs(cve) and cwe tables
     cve_importer.import_cves()
     # Step (2) save commit-, file-, and method- level data tables to the database
+    get_ref_links(verify=True)
+    a=0/0
     store_tables(get_ref_links())
     # Step (3) pruning the database tables
     if db.table_exists('method_change'):

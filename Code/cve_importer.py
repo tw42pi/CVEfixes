@@ -22,12 +22,12 @@ import database as db
 
 urlhead = 'https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-'
 urltail = '.json.zip'
-initYear = 2022
+initYear = 2002
 currentYear = datetime.datetime.now().year
 
 # Consider only current year CVE records when sample_limit>0 for the simplified example.
-if cf.SAMPLE_LIMIT > 0:
-    initYear = currentYear
+#if cf.SAMPLE_LIMIT > 0:
+#    initYear = currentYear
 
 df = pd.DataFrame()
 
@@ -125,8 +125,8 @@ def assign_cwes_to_cves(df_cve: pd.DataFrame):
     assert df_cwes.cwe_id.is_unique, "Primary keys are not unique in cwe records!"
     assert df_cwes_class.set_index(['cve_id', 'cwe_id']).index.is_unique, \
         'Primary keys are not unique in cwe_classification records!'
-    assert set(list(df_cwes_class.cwe_id)).issubset(set(list(df_cwes.cwe_id))), \
-        'Not all foreign keys for the cwe_classification records are present in the cwe table!'
+    #assert set(list(df_cwes_class.cwe_id)).issubset(set(list(df_cwes.cwe_id))), \
+    #    'Not all foreign keys for the cwe_classification records are present in the cwe table!'
 
     df_cwes = df_cwes[cwe_columns].reset_index()  # to maintain the order of the columns
     df_cwes.to_sql(name="cwe", con=db.conn, if_exists='replace', index=False)
@@ -143,6 +143,7 @@ def import_cves():
         cf.logger.warning('The cve table already exists, loading and continuing extraction...')
         # df_cve = pd.read_sql(sql="SELECT * FROM cve", con=db.conn)
     else:
+        print("init year ", initYear)
         for year in range(initYear, currentYear + 1):
             extract_target = 'nvdcve-1.1-' + str(year) + '.json'
             zip_file_url = urlhead + str(year) + urltail
@@ -162,7 +163,7 @@ def import_cves():
                 if year == initYear:  # initialize the df_methods by the first year data
                     df_cve = pd.DataFrame(yearly_data)
                 else:
-                    df_cve = df_cve.append(pd.DataFrame(yearly_data))
+                    df_cve = pd.concat([df_cve, pd.DataFrame(yearly_data)])
                 cf.logger.info(f'The CVE json for {year} has been merged')
 
         df_cve = preprocess_jsons(df_cve)

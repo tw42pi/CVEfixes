@@ -8,7 +8,7 @@ DATA_PATH = 'Data'
 DATABASE_NAME = 'CVEfixes_sample.db'
 USER = None
 TOKEN = None
-SAMPLE_LIMIT = 25
+SAMPLE_LIMIT = 0
 NUM_WORKERS = 4
 LOGGING_LEVEL = logging.WARNING
 

@@ -2,6 +2,7 @@ import ast
 import os
 import re
 import uuid
+from random import sample
 
 import pandas as pd
 import requests
@@ -74,25 +75,41 @@ method_columns = [
     'before_change',
 ]
 
+commit_url_old = re.compile(r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
+                            r'(?P<project>[^\/]*))\/(commit|commits)\/(?P<hash>\w+)#?)+)')
+commit_url_git_old = re.compile(r'a=commit(diff(_plain)?)?(;|%3(b|B))h=(?P<hash>[a-f0-9]{40})#?')
+commit_url = re.compile(r'(?P<repo>(https|http):\/\/(?P<domain>[^\/]+)(?P<subdirs>(\/[^\/]+)*))(\/-)?\/' \
+                        r'(commit|commits|\+)\/(\?id=)?(?P<hash>[a-f0-9]{40})#?')
+pullrequest_url = re.compile(r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
+                             r'(?P<project>[^\/]*))\/pull\/(?P<ID>\w+)#?)+)')
+issue_url = re.compile(r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
+                       r'(?P<project>[^\/]*))\/issues\/(?P<ID>\w+)#?)+)')
+
 
 def check_url_commit(url):
-    commit_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
-                 r'(?P<project>[^\/]*))\/(commit|commits)\/(?P<hash>\w+)#?)+)'
-    link = re.search(commit_url, url)
+    link = commit_url_git_old.search(url)
     if link:
-        return link.group('hash'), link.group('repo').replace(r'http:', r'https:')
-    return None, None
+        try:
+            url = requests.head(url.replace("diff_plain", "diff").replace("%3B", ";"), allow_redirects=True).url
+        except:
+            print("Something went wrong with ", url)
+    link = commit_url.search(url)
+    if link:
+        return [link.group('hash')], link.group('repo').replace(r'http:', r'https:')
+    return [], None
 
 
 def check_url_pullrequest(url):
-    pullrequest_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
-                      r'(?P<project>[^\/]*))\/pull\/(?P<ID>\w+)#?)+)'
-    link = re.search(pullrequest_url, url)
+    link = pullrequest_url.search(url)
     if link:
         commit_list_url = link.group('repo') + "/pull/" + link.group('ID') + "/commits_list"
         # header = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0"}
         # print("PR ", url, commit_list_url)
         request = requests.get(commit_list_url)
+        if request.request.url != commit_list_url:
+            print(commit_list_url, "->", request.request.url)
+            if request.request.url.endswith("issues/" + link.group('ID')):
+                return [], "processed"
         web_data = request.content
         soup = BeautifulSoup(web_data, features="html.parser")
         # print(url, commit_list_url)
@@ -100,23 +117,28 @@ def check_url_pullrequest(url):
 
         # print(link.group('repo'))
         # print(soup.find_all("clipboard-copy"))
-        hashes = [item["value"] for item in soup.find_all("clipboard-copy")]  # soup.select("input[name='oid']")]
+        try:
+            hashes = [item["value"] for item in
+                      soup.find_all("clipboard-copy")]  # if "value" in item]  # soup.select("input[name='oid']")]
+        # for item in soup.find_all("clipboard-copy"):
+        #    if not "value" in item:
+        except KeyError:
+            cf.logger.debug(f"weird behaviour at {url} with {soup.find_all('clipboard-copy')}")
+
         # print(hashes)
         # a = input("verify PR "+url)
         if hashes:
             return hashes, link.group('repo').replace(r'http:', r'https:')
+        return [], "processed"
     return [], None
 
 
 def check_url_issue(url):
-    issue_url = r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
-                r'(?P<project>[^\/]*))\/issues\/(?P<ID>\w+)#?)+)'
-
-    link = re.search(issue_url, url)
+    link = issue_url.search(url)
     if link:
         issues_url = link.group('repo') + "/issues/" + link.group('ID')
         # header = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0"}
-        print("issue ", url, issues_url)
+        # print("issue ", url, issues_url)
         request = requests.get(issues_url)
         web_data = request.content
         soup = BeautifulSoup(web_data, features="html.parser")
@@ -145,6 +167,7 @@ def check_url_issue(url):
         # a = input("verify "+url)
         if hashes:
             return list(hashes), link.group('repo').replace(r'http:', r'https:')
+        return [], "processed"
     return [], None
 
 
@@ -153,7 +176,65 @@ def check_url(url):
         hashes, repo = func(url)
         if hashes:
             return hashes, repo
+        if repo:
+            return [], "processed"
     return [], None
+
+
+def test_random_subset_cve_links(df_master):
+    MAX_ENTRIES = -1
+    not_found = 0
+    num_found = 0
+    num_processed = 0
+    num_now_found = 0
+    # print(len(df_master))
+    #for i in sample(range(len(df_master)), len(df_master)):
+    for i in range(len(df_master)):
+        ref_list = ast.literal_eval(df_master['reference_json'].iloc[i])
+        found = False
+        new_found_url = []
+        other_url = []
+        processed_url = []
+        if len(ref_list) > 0:
+            for ref in ref_list:
+                url = dict(ref)['url']
+                link = commit_url_old.search(url)
+                if link:
+                    found = True
+                else:
+                    hashes, repo_url = check_url(url)
+                    if hashes:
+                        new_found_url.append(url)
+                    elif repo_url == "processed":
+                        processed_url.append(url)
+                    else:
+                        ignore_urls = ["redhat.com", "ubuntu.com", "debian.org", "opensuse.org", "exchange",
+                                       "apache.org",
+                                       ".xforce.ibmcloud.c", "exploit-db.c", "twitter.com", "securitytracker.com",
+                                       "/advisories", "osvdb.org", "marc.info", "//lists.", "/securitybulletins",
+                                       "securityfocus.com", "securityreason.com", "oracle.com", "cert.", "security.org"]
+                        show_urls = ["git", "commit"]  # , "svn"]
+                        # if not [item for item in ignore_urls if item in url]:
+                        if [item for item in show_urls if item in url and not "igit" in url]:
+                            other_url.append(url)
+            if not found:
+                if new_found_url:
+                    num_now_found += 1
+                    urls = "\n".join(new_found_url)
+                    # cf.logger.debug(f'{df_master["cve_id"][i]}: now found urls:\n{urls}')
+                elif processed_url:
+                    num_processed += 1
+                    urls = "\n".join(processed_url)
+                    # cf.logger.debug(f'{df_master["cve_id"][i]}: now processed urls:\n{urls}')
+                elif other_url:
+                    urls = "\n".join(other_url)
+                    cf.logger.debug(f'{df_master["cve_id"][i]}: ignored urls:\n{urls}')
+                not_found += 1
+                if not_found == MAX_ENTRIES:
+                    break
+            else:
+                num_found += 1
+    return num_found, num_now_found, num_processed
 
 
 def extract_project_links(df_master):
