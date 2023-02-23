@@ -77,25 +77,109 @@ method_columns = [
 
 commit_url_old = re.compile(r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
                             r'(?P<project>[^\/]*))\/(commit|commits)\/(?P<hash>\w+)#?)+)')
-commit_url_git_old = re.compile(r'a=commit(diff(_plain)?)?(;|%3(b|B))h=(?P<hash>[a-f0-9]{40})#?')
+commit_url_git_svm = re.compile(r'(?P<repo>(https|http):\/\/(?P<domain>[^\/]+)(?P<subdirs>(\/[^\/]+)*))\/?' \
+                                r'\?(p=(?P<project>[^;]+);)?a=commit(diff(_plain)?)?;h=(?P<hash>[a-f0-9]{6,40})#?')
+commit_url_cgit = re.compile(r'(?P<repo>(https|http):\/\/(?P<domain>[^\/]+)(?P<subdirs>(\/[^\/]+)*))\/commit\/?' \
+                             r'\?(h=(?P<project>[^&]+)&)?id=(?P<hash>[a-f0-9]{6,40})#?')
 commit_url = re.compile(r'(?P<repo>(https|http):\/\/(?P<domain>[^\/]+)(?P<subdirs>(\/[^\/]+)*))(\/-)?\/' \
-                        r'(commit|commits|\+)\/(\?id=)?(?P<hash>[a-f0-9]{40})#?')
+                        r'(commit|commits|\+)\/(\?id=)?(?P<hash>[a-f0-9]{6,40})#?')
 pullrequest_url = re.compile(r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
                              r'(?P<project>[^\/]*))\/pull\/(?P<ID>\w+)#?)+)')
 issue_url = re.compile(r'(((?P<repo>(https|http):\/\/(bitbucket|github|gitlab)\.(org|com)\/(?P<owner>[^\/]+)\/' \
                        r'(?P<project>[^\/]*))\/issues\/(?P<ID>\w+)#?)+)')
+url_map = {}
+
+
+def extract_repo_url_svm(url):
+    request = requests.get(url)
+    web_data = request.content
+    soup = BeautifulSoup(web_data, features="html.parser")
+    possible_repo_urls = soup.select(".metadata_url > td")
+    # print(url, possible_repo_urls)
+    for v in ["http", "git", "ssh"]:
+        for repo_url in possible_repo_urls:
+            if repo_url.string and repo_url.string.startswith(v):
+                return repo_url.string
+#    print("nothing found for ", url)
+
+
+def extract_repo_url_cgit(url):
+    request = requests.get(url)
+    web_data = request.content
+    soup = BeautifulSoup(web_data, features="html.parser")
+    possible_repo_urls = soup.select('a[rel="vcs-git"]')
+    # print(url, possible_repo_urls)
+    for v in ["http", "git", "ssh"]:
+        for a in possible_repo_urls:
+            repo_url = a["href"]
+            if repo_url and repo_url.startswith(v):
+                return repo_url
+#    print("nothing found for ", url)
 
 
 def check_url_commit(url):
-    link = commit_url_git_old.search(url)
-    if link:
-        try:
-            url = requests.head(url.replace("diff_plain", "diff").replace("%3B", ";"), allow_redirects=True).url
-        except:
-            print("Something went wrong with ", url)
     link = commit_url.search(url)
     if link:
         return [link.group('hash')], link.group('repo').replace(r'http:', r'https:')
+    return [], None
+
+
+def check_url_commit_git_svm(url):
+    url = url.replace("%3B", ";")
+    link = commit_url_git_svm.search(url)
+    if link:
+        matching_part = url[:url.find("a=commit")]
+        if matching_part in url_map:
+            repo_url = url_map[matching_part]
+            if repo_url:
+                return [link.group('hash')], repo_url
+            return [], "dead"
+        try:
+            url = requests.head(url.replace("diff_plain", "diff"), allow_redirects=True).url
+            redirect = commit_url_git_svm.search(url)
+            if redirect:
+                repo_url = extract_repo_url_svm(matching_part)
+                url_map[matching_part] = repo_url
+                # print("mapping", matching_part, " -> ", repo_url)
+                if repo_url:
+                    return [link.group('hash')], repo_url
+                return [], "dead"
+            # redirected url might be detectable
+            return check_url_commit(url)
+        except requests.exceptions.ConnectionError:
+            url_map[matching_part] = None
+            return [], "dead"
+        except Exception as e:
+            print("Something went wrong with ", url, e)
+    return [], None
+
+
+def check_url_commit_cgit(url):
+    link = commit_url_cgit.search(url)
+    if link:
+        matching_part = link.group("repo")
+        if matching_part in url_map:
+            repo_url = url_map[matching_part]
+            if repo_url:
+                return [link.group('hash')], repo_url
+            return [], "dead"
+        try:
+            url = requests.head(url, allow_redirects=True).url
+            redirect = commit_url_cgit.search(url)
+            if redirect:
+                repo_url = extract_repo_url_cgit(matching_part)
+                url_map[matching_part] = repo_url
+                # print("mapping", matching_part, " -> ", repo_url)
+                if repo_url:
+                    return [link.group('hash')], repo_url
+                return [], "dead"
+            # redirected url might be detectable
+            return check_url_commit(url)
+        except requests.exceptions.ConnectionError:
+            url_map[matching_part] = None
+            return [], "dead"
+        except Exception as e:
+            print("Something went wrong with ", url, e)
     return [], None
 
 
@@ -172,7 +256,7 @@ def check_url_issue(url):
 
 
 def check_url(url):
-    for func in [check_url_commit, check_url_pullrequest, check_url_issue]:
+    for func in [check_url_commit_git_svm, check_url_commit_cgit, check_url_commit, check_url_pullrequest, check_url_issue]:
         hashes, repo = func(url)
         if hashes:
             return hashes, repo
@@ -188,7 +272,7 @@ def test_random_subset_cve_links(df_master):
     num_processed = 0
     num_now_found = 0
     # print(len(df_master))
-    #for i in sample(range(len(df_master)), len(df_master)):
+    # for i in sample(range(len(df_master)), len(df_master)):
     for i in range(len(df_master)):
         ref_list = ast.literal_eval(df_master['reference_json'].iloc[i])
         found = False

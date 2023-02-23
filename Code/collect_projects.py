@@ -77,7 +77,8 @@ def get_ref_links(verify=False):
         for year in range(2002, 2024):
             df_master = pd.read_sql(f"SELECT * FROM cve WHERE cve_id LIKE 'CVE-{year}%'", con=db.conn)
             found, found_new, processed = test_random_subset_cve_links(df_master)
-            results[year] = {"total": len(df_master), "found_orig":found,"found_new":found_new,"additional":processed}
+            results[year] = {"total": len(df_master), "found_orig": found, "found_new": found_new,
+                             "additional": processed}
         json.dumps(results)
         json.dump(results, open("Data/json/compare_stats.json", "w"))
         return None
@@ -240,7 +241,7 @@ def store_tables(df_fixes):
         cf.logger.debug(f'Number of total methods fetched by all the commits: {method_count}')
 
         vul_method_count = \
-        pd.read_sql('SELECT count(*) from method_change WHERE before_change="True";', con=db.conn).iloc[0].iloc[0]
+            pd.read_sql('SELECT count(*) from method_change WHERE before_change="True";', con=db.conn).iloc[0].iloc[0]
         cf.logger.debug(f"Number of vulnerable methods fetched by all the commits: {vul_method_count}")
     else:
         cf.logger.warning('The method_change table does not exist')
@@ -256,7 +257,7 @@ if __name__ == '__main__':
     cve_importer.import_cves()
     # Step (2) save commit-, file-, and method- level data tables to the database
     get_ref_links(verify=True)
-    a=0/0
+    a = 0 / 0
     store_tables(get_ref_links())
     # Step (3) pruning the database tables
     if db.table_exists('method_change'):
