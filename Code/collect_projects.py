@@ -1,4 +1,6 @@
 import json
+import queue
+import threading
 
 import pandas as pd
 import requests
@@ -25,6 +27,9 @@ repo_columns = [
     'forks_count',
     'stars_count'
 ]
+NUM_WORKERS = 8
+repo_queue = queue.Queue()
+db_queue = queue.Queue()
 
 
 def find_unavailable_urls(urls):
@@ -34,25 +39,38 @@ def find_unavailable_urls(urls):
     sleeptime = 0
     unavailable_urls = []
     for url in urls:
-        response = requests.head(url)
-
-        # wait while sending too many requests (increasing timeout on every iteration)
-        while response.status_code == 429:
-            sleeptime += 10
-            time.sleep(sleeptime)
+        try:
             response = requests.head(url)
-        sleeptime = 0
 
-        # GitLab responds to unavailable repositories by redirecting to their login page.
-        # This code is a bit brittle with a hardcoded URL but we want to allow for projects
-        # that are redirected due to renaming or transferal to new owners...
-        if (response.status_code >= 400) or \
-                (response.is_redirect and
-                 response.headers['location'] == 'https://gitlab.com/users/sign_in'):
-            cf.logger.debug(f'Reference {url} is not available with code: {response.status_code}')
+            # wait while sending too many requests (increasing timeout on every iteration)
+            while response.status_code == 429:
+                sleeptime += 10
+                time.sleep(sleeptime)
+                response = requests.head(url)
+            sleeptime = 0
+
+            # GitLab responds to unavailable repositories by redirecting to their login page.
+            # This code is a bit brittle with a hardcoded URL but we want to allow for projects
+            # that are redirected due to renaming or transferal to new owners...
+            if (response.status_code >= 400) or \
+                    (response.is_redirect and
+                     response.headers['location'] == 'https://gitlab.com/users/sign_in'):
+                cf.logger.debug(f'Reference {url} is not available with code: {response.status_code}')
+                unavailable_urls.append(url)
+            else:
+                cf.logger.debug(f'Reference {url} is available with code: {response.status_code}')
+        except requests.exceptions.MissingSchema:
+            cf.logger.debug(f'Reference {url} is weird')
             unavailable_urls.append(url)
-        else:
-            cf.logger.debug(f'Reference {url} is available with code: {response.status_code}')
+        except requests.exceptions.InvalidSchema:
+            if url.startswith("git://"):
+                cf.logger.debug(f'Reference {url} is a git link, no request call possible')
+            else:
+                cf.logger.debug(f'Reference {url} is not usable')
+                unavailable_urls.append(url)
+        except requests.exceptions.ConnectionError:
+            cf.logger.debug(f'Reference {url} not reachable')
+            unavailable_urls.append(url)
 
     return unavailable_urls
 
@@ -83,7 +101,7 @@ def get_ref_links(verify=False):
         json.dump(results, open("Data/json/compare_stats.json", "w"))
         return None
     elif db.table_exists('fixes'):
-        if cf.SAMPLE_LIMIT > 0:
+        if False:  #cf.SAMPLE_LIMIT > 0:
             df_fixes = pd.read_sql("SELECT * FROM fixes LIMIT " + str(cf.SAMPLE_LIMIT), con=db.conn)
             df_fixes.to_sql(name='fixes', con=db.conn, if_exists='replace', index=False)
         else:
@@ -105,14 +123,14 @@ def get_ref_links(verify=False):
         cf.logger.debug(
             f'After filtering, {len(df_fixes)} references remain ({len(set(list(df_fixes.repo_url)))} unique)')
 
-        if cf.SAMPLE_LIMIT > 0:
-            # filtering out some of the major projects that would take a long time for a simplified example database.
-            df_fixes = df_fixes[~df_fixes.repo_url.isin(['https://github.com/torvalds/linux',
-                                                         'https://github.com/ImageMagick/ImageMagick',
-                                                         'https://github.com/the-tcpdump-group/tcpdump',
-                                                         'https://github.com/phpmyadmin/phpmyadmin',
-                                                         'https://github.com/FFmpeg/FFmpeg'])]
-            df_fixes = df_fixes.head(int(cf.SAMPLE_LIMIT))
+        #if cf.SAMPLE_LIMIT > 0:
+        #    # filtering out some of the major projects that would take a long time for a simplified example database.
+        #    df_fixes = df_fixes[~df_fixes.repo_url.isin(['https://github.com/torvalds/linux',
+        #                                                 'https://github.com/ImageMagick/ImageMagick',
+        #                                                 'https://github.com/the-tcpdump-group/tcpdump',
+        #                                                 'https://github.com/phpmyadmin/phpmyadmin',
+        #                                                 'https://github.com/FFmpeg/FFmpeg'])]
+        #    df_fixes = df_fixes.head(int(cf.SAMPLE_LIMIT))
 
         df_fixes.to_sql(name='fixes', con=db.conn, if_exists='replace', index=False)
 
@@ -172,6 +190,56 @@ def save_repo_meta(repo_url):
             cf.logger.warning(f'Problem while fetching repository meta-information: {e}')
 
 
+def get_repo_data(df_fixes, repo_url):
+    try:
+        df_single_repo = df_fixes[df_fixes.repo_url == repo_url]
+        hashes = list(df_single_repo.hash.unique())
+        cf.logger.info('-' * 70)
+        cf.logger.info(f'Retrieving fixes for repo {repo_url.rsplit("/")[-1]}')
+
+        # extract_commits method returns data at different granularity levels
+        df_commit, df_file, df_method = extract_commits(repo_url, hashes)
+
+        if df_commit is not None:
+            db_queue.put([repo_url, df_commit, df_file, df_method])
+        else:
+            cf.logger.warning(f'Could not retrieve commit information from: {repo_url} for hashes {hashes}')
+
+    except Exception as e:
+        cf.logger.warning(f'Problem occurred while retrieving the project: {repo_url}: {e}')
+        pass  # skip fetching repository if is not available.
+
+
+def writer():
+    while True:
+        repo_url, df_commit, df_file, df_method = db_queue.get()
+        with db.conn:
+            # ----------------appending each project data to the tables-------------------------------
+            df_commit = df_commit.applymap(str)
+            df_commit.to_sql(name="commits", con=db.conn, if_exists="append", index=False)
+            cf.logger.debug(f'#Commits: {len(df_commit)}')
+
+            if df_file is not None:
+                df_file = df_file.applymap(str)
+                df_file.to_sql(name="file_change", con=db.conn, if_exists="append", index=False)
+                cf.logger.debug(f'#Files: {len(df_file)}')
+
+            if df_method is not None:
+                df_method = df_method.applymap(str)
+                df_method.to_sql(name="method_change", con=db.conn, if_exists="append", index=False)
+                cf.logger.debug(f'#Methods: {len(df_method)}')
+
+            save_repo_meta(repo_url)
+            db_queue.task_done()
+
+
+def worker(df_fixes):
+    while True:
+        repo_url = repo_queue.get()
+        get_repo_data(df_fixes, repo_url)
+        repo_queue.task_done()
+
+
 def store_tables(df_fixes):
     """
     Fetch the commits and save the extracted data into commit-, file- and method level tables.
@@ -185,43 +253,16 @@ def store_tables(df_fixes):
     repo_urls = df_fixes.repo_url.unique()
     # repo_urls = ['https://github.com/khaledhosny/ots']  # just to check for debugging
     # hashes = ['003c62d28ae438aa8943cb31535563397f838a2c', 'fd']
-    pcount = 0
 
     for repo_url in repo_urls:
-        pcount += 1
-        try:
-            df_single_repo = df_fixes[df_fixes.repo_url == repo_url]
-            hashes = list(df_single_repo.hash.unique())
-            cf.logger.info('-' * 70)
-            cf.logger.info(f'Retrieving fixes for repo {pcount} of {len(repo_urls)} - {repo_url.rsplit("/")[-1]}')
+        repo_queue.put(repo_url)
 
-            # extract_commits method returns data at different granularity levels
-            df_commit, df_file, df_method = extract_commits(repo_url, hashes)
+    for i in range(NUM_WORKERS):
+        threading.Thread(target=worker, name=f"worker{i:2}", args=(df_fixes,), daemon=True).start()
+    threading.Thread(target=writer, name=f"writer", daemon=True).start()
 
-            if df_commit is not None:
-                with db.conn:
-                    # ----------------appending each project data to the tables-------------------------------
-                    df_commit = df_commit.applymap(str)
-                    df_commit.to_sql(name="commits", con=db.conn, if_exists="append", index=False)
-                    cf.logger.debug(f'#Commits: {len(df_commit)}')
-
-                    if df_file is not None:
-                        df_file = df_file.applymap(str)
-                        df_file.to_sql(name="file_change", con=db.conn, if_exists="append", index=False)
-                        cf.logger.debug(f'#Files: {len(df_file)}')
-
-                    if df_method is not None:
-                        df_method = df_method.applymap(str)
-                        df_method.to_sql(name="method_change", con=db.conn, if_exists="append", index=False)
-                        cf.logger.debug(f'#Methods: {len(df_method)}')
-
-                    save_repo_meta(repo_url)
-            else:
-                cf.logger.warning(f'Could not retrieve commit information from: {repo_url}')
-
-        except Exception as e:
-            cf.logger.warning(f'Problem occurred while retrieving the project: {repo_url}: {e}')
-            pass  # skip fetching repository if is not available.
+    repo_queue.join()
+    db_queue.join()
 
     cf.logger.debug('-' * 70)
     if db.table_exists('commits'):
@@ -256,8 +297,8 @@ if __name__ == '__main__':
     # Step (1) save CVEs(cve) and cwe tables
     cve_importer.import_cves()
     # Step (2) save commit-, file-, and method- level data tables to the database
-    get_ref_links(verify=True)
-    a = 0 / 0
+    # get_ref_links(verify=True)
+    # a = 0 / 0
     store_tables(get_ref_links())
     # Step (3) pruning the database tables
     if db.table_exists('method_change'):

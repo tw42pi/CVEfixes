@@ -338,11 +338,12 @@ def extract_project_links(df_master):
 
                 for commit_hash in hashes:
                     row = {
-                        'cve_id': df_master['cve_id'][i],
-                        'hash': commit_hash,
-                        'repo_url': repo_url
+                        'cve_id': [df_master['cve_id'][i]],
+                        'hash': [commit_hash],
+                        'repo_url': [repo_url]
                     }
-                    df_fixes = pd.concat([df_fixes, pd.Series(row)])
+                    series = pd.DataFrame.from_dict(row)
+                    df_fixes = pd.concat([df_fixes, series])
                     # cf.logger.debug(f'{df_master["cve_id"][i]}: ACCEPTED url "{url}"')
                     found = True
                 if not hashes:

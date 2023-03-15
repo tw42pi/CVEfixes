@@ -11,7 +11,7 @@ def create_connection(db_file):
     create a connection to sqlite3 database
     """
     try:
-        return sqlite3.connect(db_file, timeout=10)  # connection via sqlite3
+        return sqlite3.connect(db_file, timeout=10, check_same_thread=False)  # connection via sqlite3
     except Error as e:
         cf.logger.critical(e)
         sys.exit(1)
